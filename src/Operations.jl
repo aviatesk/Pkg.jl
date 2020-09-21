@@ -326,11 +326,13 @@ end
 # sets version to a VersionNumber
 # adds any other packages which may be in the dependency graph
 # all versioned packges should have a `tree_hash`
-function resolve_versions!(ctx::Context, pkgs::Vector{PackageSpec})
+function resolve_versions!(ctx::Context, pkgs::Vector{PackageSpec}; julia_version::Union{VersionNumber,Nothing} = VERSION)
     # compatibility
-    v = intersect(VERSION, project_compatibility(ctx, "julia"))
-    if isempty(v)
-        @warn "julia version requirement for project not satisfied" _module=nothing _file=nothing
+    if julia_version !== nothing
+        v = intersect(julia_version, project_compatibility(ctx, "julia"))
+        if isempty(v)
+            @warn "julia version requirement for project not satisfied" _module=nothing _file=nothing
+        end
     end
     names = Dict{UUID, String}(uuid => stdlib for (uuid, stdlib) in stdlibs())
     # recursive search for packages which are tracking a path
@@ -367,7 +369,7 @@ function resolve_versions!(ctx::Context, pkgs::Vector{PackageSpec})
         names[pkg.uuid] = pkg.name
     end
     reqs = Resolve.Requires(pkg.uuid => VersionSpec(pkg.version) for pkg in pkgs)
-    graph, deps_map = deps_graph(ctx, names, reqs, fixed)
+    graph, deps_map = deps_graph(ctx, names, reqs, fixed; julia_version)
     Resolve.simplify_graph!(graph)
     vers = Resolve.resolve(graph)
 
@@ -409,7 +411,8 @@ end
 
 get_or_make!(d::Dict{K,V}, k::K) where {K,V} = get!(d, k) do; V() end
 
-function deps_graph(ctx::Context, uuid_to_name::Dict{UUID,String}, reqs::Resolve.Requires, fixed::Dict{UUID,Resolve.Fixed})
+function deps_graph(ctx::Context, uuid_to_name::Dict{UUID,String}, reqs::Resolve.Requires,
+                    fixed::Dict{UUID,Resolve.Fixed}; julia_version::Union{VersionNumber,Nothing} = VERSION)
     uuids = collect(union(keys(reqs), keys(fixed), map(fx->keys(fx.requires), values(fixed))...))
     seen = UUID[]
 
@@ -495,7 +498,7 @@ function deps_graph(ctx::Context, uuid_to_name::Dict{UUID,String}, reqs::Resolve
         end
     end
 
-    return Resolve.Graph(all_versions, all_deps, all_compat, uuid_to_name, reqs, fixed, #=verbose=# ctx.graph_verbose),
+    return Resolve.Graph(all_versions, all_deps, all_compat, uuid_to_name, reqs, fixed, #=verbose=# ctx.graph_verbose; julia_version),
            all_deps
 end
 
@@ -1101,26 +1104,26 @@ function assert_can_add(ctx::Context, pkgs::Vector{PackageSpec})
     end
 end
 
-function tiered_resolve(ctx::Context, pkgs::Vector{PackageSpec})
+function tiered_resolve(ctx::Context, pkgs::Vector{PackageSpec}; julia_version::Union{VersionNumber,Nothing} = VERSION)
     try # do not modify existing subgraph
-        return targeted_resolve(ctx, pkgs, PRESERVE_ALL)
+        return targeted_resolve(ctx, pkgs, PRESERVE_ALL; julia_version)
     catch err
         err isa Resolve.ResolverError || rethrow()
     end
     try # do not modify existing direct deps
-        return targeted_resolve(ctx, pkgs, PRESERVE_DIRECT)
+        return targeted_resolve(ctx, pkgs, PRESERVE_DIRECT; julia_version)
     catch err
         err isa Resolve.ResolverError || rethrow()
     end
     try
-        return targeted_resolve(ctx, pkgs, PRESERVE_SEMVER)
+        return targeted_resolve(ctx, pkgs, PRESERVE_SEMVER; julia_version)
     catch err
         err isa Resolve.ResolverError || rethrow()
     end
-    return targeted_resolve(ctx, pkgs, PRESERVE_NONE)
+    return targeted_resolve(ctx, pkgs, PRESERVE_NONE; julia_version)
 end
 
-function targeted_resolve(ctx::Context, pkgs::Vector{PackageSpec}, preserve::PreserveLevel)
+function targeted_resolve(ctx::Context, pkgs::Vector{PackageSpec}, preserve::PreserveLevel; julia_version::Union{VersionNumber,Nothing} = VERSION)
     if preserve == PRESERVE_ALL
         pkgs = load_all_deps(ctx, pkgs)
     elseif preserve == PRESERVE_DIRECT
@@ -1131,19 +1134,21 @@ function targeted_resolve(ctx::Context, pkgs::Vector{PackageSpec}, preserve::Pre
         pkgs = load_direct_deps(ctx, pkgs; preserve=preserve)
     end
     check_registered(ctx, pkgs)
-    deps_map = resolve_versions!(ctx, pkgs)
+    deps_map = resolve_versions!(ctx, pkgs; julia_version)
     return pkgs, deps_map
 end
 
-function _resolve(ctx::Context, pkgs::Vector{PackageSpec}, preserve::PreserveLevel)
+function _resolve(ctx::Context, pkgs::Vector{PackageSpec}, preserve::PreserveLevel;
+                  julia_version::Union{VersionNumber,Nothing} = VERSION)
     printpkgstyle(ctx, :Resolving, "package versions...")
     return preserve == PRESERVE_TIERED ?
-        tiered_resolve(ctx, pkgs) :
-        targeted_resolve(ctx, pkgs, preserve)
+        tiered_resolve(ctx, pkgs; julia_version) :
+        targeted_resolve(ctx, pkgs, preserve; julia_version)
 end
 
 function add(ctx::Context, pkgs::Vector{PackageSpec}, new_git=UUID[];
-             preserve::PreserveLevel=PRESERVE_TIERED, platform::AbstractPlatform=HostPlatform())
+             preserve::PreserveLevel=PRESERVE_TIERED, platform::AbstractPlatform=HostPlatform(),
+             julia_version::Union{VersionNumber,Nothing} = VERSION)
     assert_can_add(ctx, pkgs)
     # load manifest data
     for (i, pkg) in pairs(pkgs)
@@ -1152,7 +1157,7 @@ function add(ctx::Context, pkgs::Vector{PackageSpec}, new_git=UUID[];
     end
     foreach(pkg -> ctx.env.project.deps[pkg.name] = pkg.uuid, pkgs) # update set of deps
     # resolve
-    pkgs, deps_map = _resolve(ctx, pkgs, preserve)
+    pkgs, deps_map = _resolve(ctx, pkgs, preserve; julia_version)
     update_manifest!(ctx, pkgs, deps_map)
     new_apply = download_source(ctx, pkgs)
 
@@ -1167,14 +1172,15 @@ end
 
 # Input: name, uuid, and path
 function develop(ctx::Context, pkgs::Vector{PackageSpec}, new_git::Vector{UUID};
-                 preserve::PreserveLevel=PRESERVE_TIERED, platform::AbstractPlatform=HostPlatform())
+                 preserve::PreserveLevel=PRESERVE_TIERED, platform::AbstractPlatform=HostPlatform(),
+                 julia_version::Union{VersionNumber,Nothing} = VERSION)
     assert_can_add(ctx, pkgs)
     # no need to look at manifest.. dev will just nuke whatever is there before
     for pkg in pkgs
         ctx.env.project.deps[pkg.name] = pkg.uuid
     end
     # resolve & apply package versions
-    pkgs, deps_map = _resolve(ctx, pkgs, preserve)
+    pkgs, deps_map = _resolve(ctx, pkgs, preserve; julia_version)
     update_manifest!(ctx, pkgs, deps_map)
     new_apply = download_source(ctx, pkgs; readonly=true)
     download_artifacts(ctx, pkgs; platform=platform)
@@ -1225,7 +1231,7 @@ function up_load_manifest_info!(pkg::PackageSpec, entry::PackageEntry)
     # `pkg.version` and `pkg.tree_hash` is set by `up_load_versions!`
 end
 
-function up(ctx::Context, pkgs::Vector{PackageSpec}, level::UpgradeLevel)
+function up(ctx::Context, pkgs::Vector{PackageSpec}, level::UpgradeLevel; julia_version::Union{VersionNumber,Nothing} = VERSION)
     new_git = UUID[]
     # TODO check all pkg.version == VersionSpec()
     # set version constraints according to `level`
@@ -1239,7 +1245,7 @@ function up(ctx::Context, pkgs::Vector{PackageSpec}, level::UpgradeLevel)
     end
     pkgs = load_direct_deps(ctx, pkgs; preserve = (level == UPLEVEL_FIXED ? PRESERVE_NONE : PRESERVE_DIRECT))
     check_registered(ctx, pkgs)
-    deps_map = resolve_versions!(ctx, pkgs)
+    deps_map = resolve_versions!(ctx, pkgs; julia_version)
     update_manifest!(ctx, pkgs, deps_map)
     new_apply = download_source(ctx, pkgs)
     download_artifacts(ctx, pkgs)
@@ -1276,12 +1282,12 @@ function update_package_pin!(ctx::Context, pkg::PackageSpec, ::Nothing)
     pkgerror("package $(err_rep(pkg)) not found in the manifest, run `Pkg.resolve()` and retry.")
 end
 
-function pin(ctx::Context, pkgs::Vector{PackageSpec})
+function pin(ctx::Context, pkgs::Vector{PackageSpec}; julia_version::Union{VersionNumber,Nothing} = VERSION)
     foreach(pkg -> update_package_pin!(ctx, pkg, manifest_info(ctx, pkg.uuid)), pkgs)
     pkgs = load_direct_deps(ctx, pkgs)
     check_registered(ctx, pkgs)
 
-    pkgs, deps_map = _resolve(ctx, pkgs, PRESERVE_TIERED)
+    pkgs, deps_map = _resolve(ctx, pkgs, PRESERVE_TIERED; julia_version)
     update_manifest!(ctx, pkgs, deps_map)
 
     new = download_source(ctx, pkgs)
@@ -1313,13 +1319,13 @@ end
 
 # TODO: this is two techinically different operations with the same name
 # split into two subfunctions ...
-function free(ctx::Context, pkgs::Vector{PackageSpec})
+function free(ctx::Context, pkgs::Vector{PackageSpec}; julia_version::Union{VersionNumber,Nothing} = VERSION)
     foreach(pkg -> update_package_free!(ctx, pkg, manifest_info(ctx, pkg.uuid)), pkgs)
 
     if any(pkg -> pkg.version == VersionSpec(), pkgs)
         pkgs = load_direct_deps(ctx, pkgs)
         check_registered(ctx, pkgs)
-        pkgs, deps_map = _resolve(ctx, pkgs, PRESERVE_TIERED)
+        pkgs, deps_map = _resolve(ctx, pkgs, PRESERVE_TIERED; julia_version)
         update_manifest!(ctx, pkgs, deps_map)
         new = download_source(ctx, pkgs)
         download_artifacts(ctx, new)

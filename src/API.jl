@@ -135,7 +135,8 @@ function develop(ctx::Context, pkgs::Vector{PackageSpec}; shared::Bool=true,
 end
 
 function add(ctx::Context, pkgs::Vector{PackageSpec}; preserve::PreserveLevel=PRESERVE_TIERED,
-             platform::AbstractPlatform=HostPlatform(), kwargs...)
+             platform::AbstractPlatform=HostPlatform(), julia_version::Union{VersionNumber,Nothing}=VERSION,
+             kwargs...)
     require_not_empty(pkgs, :add)
     foreach(pkg -> check_package_name(pkg.name, :add), pkgs)
     pkgs = deepcopy(pkgs)  # deepcopy for avoid mutating PackageSpec members
@@ -185,7 +186,7 @@ function add(ctx::Context, pkgs::Vector{PackageSpec}; preserve::PreserveLevel=PR
         end
     end
 
-    Operations.add(ctx, pkgs, new_git; preserve=preserve, platform=platform)
+    Operations.add(ctx, pkgs, new_git; preserve, platform, julia_version)
     return
 end
 
@@ -217,7 +218,8 @@ end
 
 function up(ctx::Context, pkgs::Vector{PackageSpec};
             level::UpgradeLevel=UPLEVEL_MAJOR, mode::PackageMode=PKGMODE_PROJECT,
-            update_registry::Bool=true, kwargs...)
+            update_registry::Bool=true, julia_version::Union{VersionNumber,Nothing} = VERSION,
+            kwargs...)
     pkgs = deepcopy(pkgs)  # deepcopy for avoid mutating PackageSpec members
     foreach(pkg -> pkg.mode = mode, pkgs)
 
@@ -242,7 +244,7 @@ function up(ctx::Context, pkgs::Vector{PackageSpec};
         manifest_resolve!(ctx, pkgs)
         ensure_resolved(ctx, pkgs)
     end
-    Operations.up(ctx, pkgs, level)
+    Operations.up(ctx, pkgs, level; julia_version)
     return
 end
 

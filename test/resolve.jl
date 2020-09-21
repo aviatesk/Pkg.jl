@@ -423,4 +423,44 @@ end
     @test_throws ResolverError resolve_tst(deps_data, reqs_data)
 end
 
+@testset "Resolving for another version of Julia" begin
+    ctx = Pkg.Types.Context()
+    function find_by_name(versions, name)
+        idx = findfirst(p -> p.name == name, versions)
+        if idx === nothing
+            return nothing
+        end
+        return versions[idx]
+    end
+    # First, we're going to resolve for specific versions of Julia, ensuring we get the right dep versions:
+    versions, deps = Pkg.Operations._resolve(ctx, [
+        Pkg.Types.PackageSpec(name="MPFR_jll", uuid=Base.UUID("3a97d323-0669-5f0c-9066-3539efd106a3")),
+    ], Pkg.Types.PRESERVE_TIERED; julia_version=v"1.5")
+    gmp = find_by_name(versions, "GMP_jll")
+    @test gmp !== nothing
+    @test gmp.version.major == 6 && gmp.version.minor == 1
+
+    versions, deps = Pkg.Operations._resolve(ctx, [
+        Pkg.Types.PackageSpec(name="MPFR_jll", uuid=Base.UUID("3a97d323-0669-5f0c-9066-3539efd106a3")),
+    ], Pkg.Types.PRESERVE_TIERED; julia_version=v"1.6")
+    gmp = find_by_name(versions, "GMP_jll")
+    @test gmp !== nothing
+    @test gmp.version.major == 6 && gmp.version.minor == 2
+
+    # We'll also test resolving an "impossible" manifest; one that requires two package versions that
+    # are not both loadable by the same Julia:
+    versions, deps = Pkg.Operations._resolve(ctx, [
+        # This version of GMP only works on Julia v1.6
+        Pkg.Types.PackageSpec(name="GMP_jll", uuid=Base.UUID("781609d7-10c4-51f6-84f2-b8444358ff6d"), version=v"6.2.0"),
+        # This version of MPFR only works on Julia v1.5
+        Pkg.Types.PackageSpec(name="MPFR_jll", uuid=Base.UUID("3a97d323-0669-5f0c-9066-3539efd106a3"), version=v"4.0.2"),
+    ], Pkg.Types.PRESERVE_TIERED; julia_version=nothing)
+    gmp = find_by_name(versions, "GMP_jll")
+    @test gmp !== nothing
+    @test gmp.version.major == 6 && gmp.version.minor == 2
+    mpfr = find_by_name(versions, "MPFR_jll")
+    @test mpfr !== nothing
+    @test mpfr.version.major == 4 && mpfr.version.minor == 0
+end
+
 end # module
